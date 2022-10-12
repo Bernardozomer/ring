@@ -1,104 +1,77 @@
 use anyhow::Result;
-use crossbeam::channel::{bounded, Sender, Receiver};
-use crossbeam::sync::WaitGroup;
+use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
 
-const NUM_ACTORS: usize = 3;
+const RING_SIZE: usize = 3;
 
 fn main() {
-    let wg = WaitGroup::new();
-    let (ctrl_sender, ctrl_receiver) = bounded(0);
+    // Create a channel for each ring member.
+    let chans: [(Sender<Msg>, Receiver<Msg>); RING_SIZE] = (0..RING_SIZE)
+        .map(|_| {
+            bounded(1)
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
 
-    let chans: [(Sender<Msg>, Receiver<Msg>); NUM_ACTORS] = [
-        bounded(0), bounded(0), bounded(0)
-    ];
+    // Create a channel for the controller.
+    let (ctrl_s, ctrl_r) = bounded(1);
 
-    let ring: [Actor; NUM_ACTORS] = [
-        Actor::new(1), Actor::new(2), Actor::new(3),
-    ];
-
-    for (i, actor) in ring.iter().enumerate() {
-        let wg = wg.clone();
-
-        thread::scope(|_| {
-            actor.election_stage(
+    // Spawn a thread for each ring member and one for the controller.
+    // Each ring member receives on its channel and sends on the next's.
+    thread::scope(|scope| {
+        for i in 0..RING_SIZE {
+            let (s, r) = (
                 match chans.get(i + 1) {
-                    Some(next) => &next.0,
-                    None => &chans[0].0,
+                    Some(next) => next.0.clone(),
+                    None => chans[0].0.clone()
                 },
-                &chans[i].1,
-                &ctrl_sender
-            ).unwrap();
+                chans[i].1.clone()
+            );
 
-            drop(wg);
-        }).unwrap();
-    }
+            let ctrl_s = ctrl_s.clone();
+            scope.spawn(move |_| election_stage(i as i32, s, r, ctrl_s));
+        }
 
-    println!("main: created process ring");
-    let ctrl_wg = wg.clone();
-
-    thread::scope(|_| {
-        control_election(&chans, &ctrl_receiver).unwrap();
-        drop(ctrl_wg);
+        println!("main: election ring created");
+        let (first_s, ctrl_r) = (chans[0].0.clone(), ctrl_r.clone());
+        scope.spawn(move |_| election_controller(first_s, ctrl_r));
     }).unwrap();
 
-    println!("main: created controller process");
-    wg.wait();
+    println!("main: done");
 }
 
-fn control_election(
-    chans: &[(Sender<Msg>, Receiver<Msg>); NUM_ACTORS],
-    controller: &Receiver<u8>
+fn election_controller(
+    s: Sender<Msg>, ctrl_r: Receiver<u8>
 ) -> Result<()> {
-    let msg = Msg {
-        kind: 1,
-        body: [0; NUM_ACTORS]
-    };
-
-    chans[0].0.send(msg)?;
-    println!("Control: sent election");
-    controller.recv()?;
-    println!("Control: received confirmation");
-    println!("Control: done");
-
+    s.send(Msg { body: [-1; RING_SIZE] })?;
+    println!("ctrl: election started");
+    ctrl_r.recv()?;
+    println!("ctrl: election ended");
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Actor {
-    id: usize,
-}
+fn election_stage(
+    id: i32, s: Sender<Msg>, r: Receiver<Msg>, ctrl_s: Sender<u8>
+) -> Result<()> {
+    let mut msg = r.recv()?;
+    println!("{}: received message {:?}", id, msg);
+    msg.body[id as usize] = id;
+    s.send(msg)?;
+    println!("{}: sent message", id);
 
-impl Actor {
-    pub fn new(id: usize) -> Self {
-        Self { id }
+    if id == 0 {
+        let msg = r.recv()?;
+        println!("{}: received message {:?}", id, msg);
+        ctrl_s.send(0)?;
+        println!("{}: sent confirmation to ctrl", id);
     }
 
-    pub fn election_stage(
-        self, s: &Sender<Msg>, r: &Receiver<Msg>,
-        controller: &Sender<u8>
-    ) -> Result<()> {
-        let mut msg = r.recv()?;
-        println!("{}: received message {:?}", self.id, msg);
-
-        msg.body[self.id] = self.id;
-        s.send(msg)?;
-        println!("{}: sent message", self.id);
-
-        if self.id == 0 {
-            msg = r.recv()?;
-            println!("{}: received message {:?}", self.id, msg);
-            controller.send(0)?;
-            println!("{}: sent confirmation", self.id);
-        }
-
-        println!("{}: done", self.id);
-        Ok(())
-    }
+    println!("{}: done", id);
+    Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Msg {
-    kind: i32,
-    body: [usize; NUM_ACTORS]
+    body: [i32; RING_SIZE]
 }
