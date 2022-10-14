@@ -80,7 +80,6 @@ fn sim_election(
     }
 
     println!("sim: done");
-    // std::process::exit(1);
     Ok(())
 }
 
