@@ -1,11 +1,26 @@
 use anyhow::Result;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
+use std::env;
+use std::fs::File;
+use std::io::prelude::*;
 
 const RING_SIZE: usize = 3;
 
+
 fn main() {
     // Create a channel for each ring member.
+    let check: String = env::args().collect();
+    let mut read = File::open(check).expect("Unable to find file!");
+    let mut info = String::new();
+    read.read_to_string(&mut info);
+    if check.chars().count() > 1{
+        if info.chars().count() > 1{
+            println!("File read successfully!");
+            //TO DO: fazer coisas com a leitura
+        }
+        println!("Unable to read file!");
+    }
     let chans: [(Sender<Msg>, Receiver<Msg>); RING_SIZE] = (0..RING_SIZE)
         .map(|_| {
             bounded(1)
