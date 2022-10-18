@@ -220,19 +220,30 @@ struct SimSeq {
 }
 
 impl Default for SimSeq {
+    /// Default simulation sequence.
+    ///
+    /// Toggle the coordinator inactive until the last ring member
+    /// is the only one left. Then, toggle its predecessor active before
+    /// toggling the coordinator inactive and then active and so on
+    /// until the first ring member is reached.
+    /// Wait 1 second between toggles.
+    ///
+    /// E.g.: The toggle order for 0 1 2 is 0 1 1 2 2 0 1 1.
     fn default() -> Self {
-        let mut toggles = Vec::new();
+        const NUM_TOGGLES: usize = RING_SIZE - 1 + (RING_SIZE - 1) * 3;
+        let mut toggles = Vec::with_capacity(NUM_TOGGLES);
 
-        // Toggle each member inactive and then active.
-        for i in 0..RING_SIZE {
-            toggles.push(i);
+        for i in 0..RING_SIZE - 1 {
             toggles.push(i);
         }
 
-        SimSeq::new(
-            toggles,
-            [1; (RING_SIZE) * 2 - 1].to_vec()
-        ).unwrap()
+        for i in (0..RING_SIZE - 1).rev() {
+            toggles.push(i);
+            toggles.push(i + 1);
+            toggles.push(i + 1);
+        }
+
+        SimSeq::new(toggles, [1; NUM_TOGGLES - 1].to_vec()).unwrap()
     }
 }
 
