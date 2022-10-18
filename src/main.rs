@@ -1,17 +1,8 @@
-#[macro_use]
-extern crate lazy_static;
-
-use std::sync::Mutex;
-
 use anyhow::{Result, bail};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
 
 const RING_SIZE: usize = 3;
-
-lazy_static! {
-    static ref COORDINATOR_ID: Mutex<usize> = Mutex::new(0);
-}
 
 fn main() {
     // Create a channel for each ring member.
@@ -43,21 +34,26 @@ fn main() {
             let sim_s = sim_s.clone();
 
             scope.spawn(
-                move |_| RingMember::new(i).election_stage(s, r, sim_s)
+                move |_| RingMember::new(i).election_stage(
+                    s, r, sim_s, 0
+                )
             );
         }
 
         println!("main: election ring created");
         let (first_s, sim_r) = (chans[0].0.clone(), sim_r.clone());
-        scope.spawn(move |_| sim_election(sim_seq, first_s, sim_r));
+        scope.spawn(move |_| sim_election(sim_seq, first_s, sim_r, 0));
     }).unwrap();
 
     println!("main: done");
 }
 
 fn sim_election(
-    seq: SimSeq, first_s: Sender<Msg>, sim_r: Receiver<bool>
+    seq: SimSeq, first_s: Sender<Msg>, sim_r: Receiver<SimMsg>,
+    coord_id: usize
 ) -> Result<()> {
+    let coord_id = coord_id;
+
     for (id, secs) in seq.toggles
         .iter()
         // Append a 0 second wait to the wait sequence
@@ -66,20 +62,26 @@ fn sim_election(
     {
         println!("sim: waiting for {:?}s", *secs);
         std::thread::sleep(std::time::Duration::new(*secs, 0));
-        first_s.send(Msg::toggle(*id))?;
+        first_s.send(Msg::Toggle { id: *id })?;
         println!("sim: toggled {}", *id);
         // Wait for toggle confirmation.
         let active = sim_r.recv()?;
 
-        if !active && *id == *COORDINATOR_ID.lock().unwrap() {
+        if let SimMsg::ConfirmToggle { id } = match sim_r.recv() {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+
+        if !active && *id == coord_id {
             first_s.send(Msg::election())?;
             println!("sim: election started");
             // Wait for election results.
             sim_r.recv()?;
+            // TODO: update coordinator
         }
     }
 
-    first_s.send(Msg::end())?;
+    first_s.send(Msg::End)?;
     println!("sim: sent end signal");
     println!("sim: done");
     Ok(())
@@ -97,58 +99,75 @@ impl RingMember {
     }
 
     fn election_stage(
-        &mut self, s: Sender<Msg>, r: Receiver<Msg>, sim_s: Sender<bool>
+        &mut self, s: Sender<Msg>, r: Receiver<Msg>, sim_s: Sender<SimMsg>,
+        coord_id: usize
     ) -> Result<()> {
+        let mut coord_id = coord_id;
+
         loop {
-            let mut msg = r.recv()?;
+            let msg = r.recv()?;
             println!("{}: received {:?}", self.id, msg);
 
-            match msg.kind {
-                MsgKind::End => {
+            match msg {
+                Msg::End => {
                     s.send(msg)?;
+                    println!("{}: will now stop", self.id);
+                    println!("{}: sent stop signal forward", self.id);
                     break;
                 }
-                MsgKind::Toggle => {
-                    if !msg.body[self.id] {
+                Msg::Toggle { id } => {
+                    if id != self.id {
                         s.send(msg)?;
                         println!("{}: sent toggle forward", self.id);
                         continue;
                     }
 
                     self.active ^= true;
-                    println!("{}: active = {}", self.id, self.active);
                     sim_s.send(self.active)?;
+                    println!("{}: active = {}", self.id, self.active);
                     println!("{}: sent toggle to sim", self.id);
                 }
-                MsgKind::Election => {
+                Msg::MemberElected { id } => {
+                    if coord_id == id {
+                        sim_s.send(true)?;
+                        println!("{}: sent result to sim", self.id);
+                        continue;
+                    }
+
+                    s.send(msg)?;
+                    coord_id = id;
+
+                    println!(
+                        "{}: {} won the election", self.id, coord_id
+                    );
+
+                    println!("{}: sent result forward", self.id);
+                }
+                Msg::Election { mut body } => {
                     if !self.active {
                         s.send(msg)?;
                         println!("{}: sent election forward", self.id);
                         continue;
                     }
 
-                    if !msg.body[self.id] {
-                        msg.body[self.id] = true;
-                        println!("{}: joined election", self.id);
+                    if !body[self.id] {
+                        body[self.id] = true;
                         s.send(msg)?;
+                        println!("{}: joined election", self.id);
                         println!("{}: sent election forward", self.id);
                         continue;
                     }
 
-                    println!("{}: election ended", self.id);
-                    let mut coord_id = COORDINATOR_ID.lock().unwrap();
-
-                    *coord_id = msg.body
-                        .iter()
+                    let winner_id = body.iter()
                         .enumerate()
-                        // TODO: This sum could overflow. Not nice.
-                        .map(|(i, b)| if *b { i } else { RING_SIZE + 1 })
+                        .filter(|(_, b)| **b)
+                        .map(|(i, _)| i)
                         .min()
-                        .unwrap()
-                        as usize;
+                        .unwrap();
 
-                    sim_s.send(true)?;
-                    println!("{}: sent results to sim", self.id);
+                    s.send(Msg::MemberElected { id: winner_id })?;
+                    println!("{}: election ended", self.id);
+                    println!("{}: sent result forward", self.id);
                 }
             }
         }
@@ -159,32 +178,23 @@ impl RingMember {
 }
 
 #[derive(Debug)]
-struct Msg {
-    kind: MsgKind,
-    body: [bool; RING_SIZE],
+enum Msg {
+    Election { body: [bool; RING_SIZE] },
+    MemberElected { id: usize },
+    Toggle { id: usize },
+    End,
 }
 
 impl Msg {
     fn election() -> Self {
-        Self { kind: MsgKind::Election, body: [false; RING_SIZE] }
-    }
-
-    fn toggle(id: usize) -> Self {
-        let mut body = [false; RING_SIZE];
-        body[id] = true;
-        Self { kind: MsgKind::Toggle, body }
-    }
-
-    fn end() -> Self {
-        Self { kind: MsgKind::End, body: [true; RING_SIZE] }
+        Self::Election { body: [false; RING_SIZE] }
     }
 }
 
 #[derive(Debug)]
-enum MsgKind {
-    Election,
-    Toggle,
-    End,
+enum SimMsg {
+    ConfirmToggle { id: usize },
+    ElecionResult { id: usize },
 }
 
 /// The `SimSeq` type, which specifies a sequence of alternating waits and
