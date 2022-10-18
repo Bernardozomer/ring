@@ -102,42 +102,48 @@ impl RingMember {
             let mut msg = r.recv()?;
             println!("{}: received {:?}", self.id, msg);
 
-            if let MsgKind::Toggle = msg.kind {
-                if msg.body[self.id] {
+            match msg.kind {
+                MsgKind::Toggle => {
+                    if !msg.body[self.id] {
+                        s.send(msg)?;
+                        println!("{}: sent toggle forward", self.id);
+                        continue;
+                    }
+
                     self.active ^= true;
                     println!("{}: active = {}", self.id, self.active);
                     sim_s.send(self.active)?;
                     println!("{}: sent toggle to sim", self.id);
-                } else {
-                    s.send(msg)?;
-                    println!("{}: sent toggle forward", self.id);
-                }
-            } else {
-                if self.active {
-                    if msg.body[self.id] {
-                        println!("{}: election ended", self.id);
-                        let mut coord_id = COORDINATOR_ID.lock().unwrap();
+                },
+                MsgKind::Election => {
+                    if !self.active {
+                        s.send(msg)?;
+                        println!("{}: sent election forward", self.id);
+                        continue;
+                    }
 
-                        *coord_id = msg.body
-                            .iter()
-                            .enumerate()
-                            // TODO: This sum could overflow. Not nice.
-                            .map(|(i, b)| if *b { i } else { RING_SIZE + 1 })
-                            .min()
-                            .unwrap()
-                            as usize;
-
-                        sim_s.send(true)?;
-                        println!("{}: sent results to sim", self.id);
-                    } else {
+                    if !msg.body[self.id] {
                         msg.body[self.id] = true;
                         println!("{}: joined election", self.id);
                         s.send(msg)?;
                         println!("{}: sent election forward", self.id);
+                        continue;
                     }
-                } else {
-                    s.send(msg)?;
-                    println!("{}: sent election forward", self.id);
+
+                    println!("{}: election ended", self.id);
+                    let mut coord_id = COORDINATOR_ID.lock().unwrap();
+
+                    *coord_id = msg.body
+                        .iter()
+                        .enumerate()
+                        // TODO: This sum could overflow. Not nice.
+                        .map(|(i, b)| if *b { i } else { RING_SIZE + 1 })
+                        .min()
+                        .unwrap()
+                        as usize;
+
+                    sim_s.send(true)?;
+                    println!("{}: sent results to sim", self.id);
                 }
             }
         }
