@@ -79,6 +79,8 @@ fn sim_election(
         }
     }
 
+    first_s.send(Msg::end())?;
+    println!("sim: sent end signal");
     println!("sim: done");
     Ok(())
 }
@@ -97,12 +99,15 @@ impl RingMember {
     fn election_stage(
         &mut self, s: Sender<Msg>, r: Receiver<Msg>, sim_s: Sender<bool>
     ) -> Result<()> {
-        // TODO: No stop condition.
         loop {
             let mut msg = r.recv()?;
             println!("{}: received {:?}", self.id, msg);
 
             match msg.kind {
+                MsgKind::End => {
+                    s.send(msg)?;
+                    break;
+                }
                 MsgKind::Toggle => {
                     if !msg.body[self.id] {
                         s.send(msg)?;
@@ -114,7 +119,7 @@ impl RingMember {
                     println!("{}: active = {}", self.id, self.active);
                     sim_s.send(self.active)?;
                     println!("{}: sent toggle to sim", self.id);
-                },
+                }
                 MsgKind::Election => {
                     if !self.active {
                         s.send(msg)?;
@@ -169,12 +174,17 @@ impl Msg {
         body[id] = true;
         Self { kind: MsgKind::Toggle, body }
     }
+
+    fn end() -> Self {
+        Self { kind: MsgKind::End, body: [true; RING_SIZE] }
+    }
 }
 
 #[derive(Debug)]
 enum MsgKind {
     Election,
     Toggle,
+    End,
 }
 
 /// The `SimSeq` type, which specifies a sequence of alternating waits and
