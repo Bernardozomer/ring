@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
+use std::fs;
+use std::path::Path;
 
 const RING_SIZE: usize = 3;
 
@@ -19,6 +21,8 @@ fn main() {
     // TODO: Read the simulation sequence from a file.
     let sim_seq = SimSeq::default();
 
+    let path = Path::new("insert path here");
+    
     // Spawn a thread for each ring member and one for the controller.
     // Each ring member receives on its channel and sends on the next's.
     thread::scope(|scope| {
@@ -263,6 +267,11 @@ impl SimSeq {
     /// Read the simulation sequence from a file.
     /// Waits on odd lines, and toggles on evens.
     fn from_file(path: &std::path::Path) -> Result<Self> {
-        unimplemented!()
+        let contents = fs::read_to_string(path)
+            .expect("Should have been able to read the file");
+            
+        // como que usa as variaveis? 
+        
+        Ok(Self{ toggles, waits })
     }
 }
