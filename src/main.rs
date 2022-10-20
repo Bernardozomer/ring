@@ -34,9 +34,7 @@ fn main() {
             let sim_s = sim_s.clone();
 
             scope.spawn(
-                move |_| RingMember::new(i).election_stage(
-                    s, r, sim_s, 0
-                )
+                move |_| RingMember::new(i, s, sim_s, r, 0).run()
             );
         }
 
@@ -91,40 +89,42 @@ fn sim_election(
 struct RingMember {
     id: usize,
     active: bool,
+    s: Sender<Msg>,
+    sim_s: Sender<SimMsg>,
+    r: Receiver<Msg>,
+    coord_id: usize,
 }
 
 impl RingMember {
-    fn new(id: usize) -> Self {
-        Self { id, active: true }
+    fn new(
+        id: usize, s: Sender<Msg>, sim_s: Sender<SimMsg>, r: Receiver<Msg>,
+        coord_id: usize
+    ) -> Self {
+        Self { id, active: true, s, sim_s, r, coord_id }
     }
 
-    fn election_stage(
-        &mut self, s: Sender<Msg>, r: Receiver<Msg>, sim_s: Sender<SimMsg>,
-        coord_id: usize
-    ) -> Result<()> {
-        let mut coord_id = coord_id;
-
+    fn run(&mut self) -> Result<()> {
         loop {
-            let msg = r.recv()?;
+            let msg = self.r.recv()?;
             println!("{}: received {:?}", self.id, msg);
 
             match msg {
                 Msg::End => {
-                    s.send(msg)?;
+                    self.s.send(msg)?;
                     println!("{}: will now stop", self.id);
                     println!("{}: sent stop signal forward", self.id);
                     break;
                 }
                 Msg::Toggle { id } => {
                     if id != self.id {
-                        s.send(msg)?;
+                        self.s.send(msg)?;
                         println!("{}: sent toggle forward", self.id);
                         continue;
                     }
 
                     self.active ^= true;
 
-                    sim_s.send(SimMsg::ConfirmToggle {
+                    self.sim_s.send(SimMsg::ConfirmToggle {
                         id: self.id,
                         active: self.active
                     })?;
@@ -133,24 +133,24 @@ impl RingMember {
                     println!("{}: sent toggle to sim", self.id);
                 }
                 Msg::MemberElected { id } => {
-                    if coord_id == id {
-                        sim_s.send(SimMsg::ElecionResult { id })?;
+                    if self.coord_id == id {
+                        self.sim_s.send(SimMsg::ElecionResult { id })?;
                         println!("{}: sent result to sim", self.id);
                         continue;
                     }
 
-                    s.send(msg)?;
-                    coord_id = id;
+                    self.s.send(msg)?;
+                    self.coord_id = id;
 
                     println!(
-                        "{}: {} won the election", self.id, coord_id
+                        "{}: {} won the election", self.id, self.coord_id
                     );
 
                     println!("{}: sent result forward", self.id);
                 }
                 Msg::Election { mut body } => {
                     if !self.active {
-                        s.send(msg)?;
+                        self.s.send(msg)?;
                         println!("{}: sent election forward", self.id);
                         continue;
                     }
@@ -158,7 +158,7 @@ impl RingMember {
                     if !body[self.id] {
                         body[self.id] = true;
                         let msg = Msg::Election { body };
-                        s.send(msg)?;
+                        self.s.send(msg)?;
                         println!("{}: joined election", self.id);
                         println!("{}: sent election forward", self.id);
                         continue;
@@ -171,7 +171,7 @@ impl RingMember {
                         .min()
                         .unwrap();
 
-                    s.send(Msg::MemberElected { id: winner_id })?;
+                    self.s.send(Msg::MemberElected { id: winner_id })?;
                     println!("{}: election ended", self.id);
                     println!("{}: sent result forward", self.id);
                 }
