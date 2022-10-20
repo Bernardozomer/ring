@@ -1,4 +1,7 @@
-use anyhow::{Result, bail};
+use std::collections::HashMap;
+use std::time::Duration;
+
+use anyhow::{Result, bail, Error};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
 
@@ -23,18 +26,19 @@ fn main() {
     // Each ring member receives on its channel and sends on the next's.
     thread::scope(|scope| {
         for i in 0..RING_SIZE {
-            let (s, r) = (
-                match chans.get(i + 1) {
-                    Some(next) => next.0.clone(),
-                    None => chans[0].0.clone()
-                },
-                chans[i].1.clone()
-            );
+            let ss: HashMap<usize, Sender<Msg>> = (0..RING_SIZE)
+                .map(|j| {
+                    (j.clone(), chans[j].0.clone())
+                })
+                .filter(|(j, _)| *j != i)
+                .collect::<HashMap<_, _>>();
 
             let sim_s = sim_s.clone();
+            let r = chans[i].1.clone();
+            let next_id = if i == RING_SIZE - 1 { 0 } else { i + 1 };
 
             scope.spawn(
-                move |_| RingMember::new(i, s, sim_s, r, 0).run()
+                move |_| RingMember::new(i, ss, sim_s, r, next_id, 0).run()
             );
         }
 
@@ -60,7 +64,7 @@ fn sim_election(
     {
         println!("sim: waiting for {:?}s", *secs);
         std::thread::sleep(std::time::Duration::new(*secs, 0));
-        first_s.send(Msg::Toggle { id: *id })?;
+        first_s.send(Msg::SimToggle { id: *id })?;
         println!("sim: toggled {}", *id);
         // Wait for toggle confirmation.
         let msg = sim_r.recv()?;
@@ -79,7 +83,7 @@ fn sim_election(
         }
     }
 
-    first_s.send(Msg::End)?;
+    first_s.send(Msg::SimEnd)?;
     println!("sim: sent end signal");
     println!("sim: done");
     Ok(())
@@ -88,19 +92,20 @@ fn sim_election(
 #[derive(Debug)]
 struct RingMember {
     id: usize,
-    active: bool,
-    s: Sender<Msg>,
+    sim_active: bool,
+    ss: HashMap<usize, Sender<Msg>>,
     sim_s: Sender<SimMsg>,
     r: Receiver<Msg>,
+    next_id: usize,
     coord_id: usize,
 }
 
 impl RingMember {
     fn new(
-        id: usize, s: Sender<Msg>, sim_s: Sender<SimMsg>, r: Receiver<Msg>,
-        coord_id: usize
+        id: usize, ss: HashMap<usize, Sender<Msg>>, sim_s: Sender<SimMsg>,
+        r: Receiver<Msg>, next_id: usize, coord_id: usize
     ) -> Self {
-        Self { id, active: true, s, sim_s, r, coord_id }
+        Self { id, sim_active: true, ss, sim_s, r, next_id, coord_id }
     }
 
     fn run(&mut self) -> Result<()> {
@@ -120,6 +125,19 @@ impl RingMember {
 
     fn handle_msg(&mut self, msg: Msg) -> Result<bool> {
         match msg {
+            Msg::Ping { s_id } => {
+                if !self.sim_active {
+                    Ok(true)
+                } else {
+                    self.ss.get(&s_id)
+                        .ok_or(Error::msg("Unknown sender"))?
+                        .send(Msg::Pong)?;
+
+                    println!("{}: answered ping from {}", self.id, s_id);
+                    Ok(true)
+                }
+            }
+            Msg::Pong => Ok(true),
             Msg::Election { body } => {
                 self.vote(body)?;
                 Ok(true)
@@ -128,12 +146,15 @@ impl RingMember {
                 self.update_coord(id)?;
                 Ok(true)
 			}
-            Msg::Toggle { id } => {
+            Msg::SimToggle { id } => {
                 self.toggle(id)?;
                 Ok(true)
 			}
-            Msg::End => {
-                self.s.send(msg)?;
+            Msg::SimEnd => {
+                self.ss.get(&self.next_id)
+                    .ok_or(Error::msg("Invalid next member id"))?
+                    .send(msg)?;
+
                 println!("{}: will now stop", self.id);
                 println!("{}: sent stop signal forward", self.id);
                 Ok(false)
@@ -144,19 +165,28 @@ impl RingMember {
     /// Vote for the next coordinator or end the election if that has
     /// already been done.
     fn vote(&mut self, mut body: [bool; RING_SIZE]) -> Result<()> {
-        if !self.active {
-            self.s.send(Msg::Election { body })?;
-            println!("{}: sent election forward", self.id);
+        if !self.sim_active && body == [false; RING_SIZE] {
+            self.send(Msg::Election { body })?;
+
+            println!(
+                "{}: received election from sim, but am inactive!", self.id
+            );
+
+            println!("{}: forwarding election", self.id);
             return Ok(());
         }
 
         if !body[self.id] {
             body[self.id] = true;
-            let msg = Msg::Election { body };
-            self.s.send(msg)?;
             println!("{}: joined election", self.id);
-            println!("{}: sent election forward", self.id);
-            return Ok(());
+
+            let msg = Msg::Election { body };
+            let sent = self.send(msg);
+
+            if sent.is_ok() {
+                println!("{}: forwarding election", self.id);
+                return Ok(());
+            }
         }
 
         // Elect the ring member with the lowest id who voted.
@@ -167,8 +197,9 @@ impl RingMember {
             .min()
             .unwrap();
 
-        self.s.send(Msg::ElectionResult { id: winner_id })?;
+        self.sim_force_send(Msg::ElectionResult { id: winner_id })?;
         println!("{}: election ended", self.id);
+        println!("{}: {} won the election", self.id, winner_id);
         println!("{}: sent result forward", self.id);
         Ok(())
     }
@@ -181,7 +212,7 @@ impl RingMember {
             return Ok(());
         }
 
-        self.s.send(Msg::ElectionResult { id })?;
+        self.sim_force_send(Msg::ElectionResult { id })?;
         self.coord_id = id;
 
         println!(
@@ -195,30 +226,79 @@ impl RingMember {
     /// Toggle active/inactive if target is self, else send message forward.
     fn toggle(&mut self, id: usize) -> Result<()> {
         if id != self.id {
-            self.s.send(Msg::Toggle { id })?;
+            self.sim_force_send(Msg::SimToggle { id })?;
             println!("{}: sent toggle forward", self.id);
             return Ok(());
         }
 
-        self.active ^= true;
+        self.sim_active ^= true;
 
         self.sim_s.send(SimMsg::ConfirmToggle {
             id: self.id,
-            active: self.active
+            active: self.sim_active
         })?;
 
-        println!("{}: active = {}", self.id, self.active);
+        println!("{}: active = {}", self.id, self.sim_active);
         println!("{}: sent toggle to sim", self.id);
+        Ok(())
+    }
+
+    /// Send a message to the first active member ringwise.
+    fn send(&mut self, msg: Msg) -> Result<()> {
+        let range = (0..RING_SIZE)
+            .skip(self.id + 1)
+            .chain(0..self.id);
+
+        for i in range {
+            // Ping the next member.
+            self.ss.get(&i)
+                .ok_or(Error::msg("Missing sender"))?
+                .send(Msg::Ping { s_id: self.id })?;
+
+            println!("{}: pinged {}", self.id, i);
+
+            // Wait again for a response after handling an unexpected message
+            // if one was received.
+            loop {
+                let res = self.r.recv_timeout(Duration::from_millis(1));
+
+                if !res.is_ok() {
+                    println!("{}: {} is inactive", self.id, i);
+                    break;
+                }
+
+                if let Ok(Msg::Pong) = res {
+                    self.ss.get(&i).unwrap().send(msg)?;
+                    println!("{}: {} is active, sending message", self.id, i);
+                    return Ok(());
+                }
+
+                self.handle_msg(res.unwrap())?;
+            }
+        }
+
+        bail!("No response")
+    }
+
+    /// Send a message ringwise, starting from the next member,
+    /// Regardless of whether they are simulating inactivity or not.
+    fn sim_force_send(&self, msg: Msg) -> Result<()> {
+        self.ss.get(&self.next_id)
+            .ok_or(Error::msg("Invalid next member id"))?
+            .send(msg)?;
+
         Ok(())
     }
 }
 
 #[derive(Debug)]
 enum Msg {
+    Ping { s_id: usize },
+    Pong,
     Election { body: [bool; RING_SIZE] },
     ElectionResult { id: usize },
-    Toggle { id: usize },
-    End,
+    SimToggle { id: usize },
+    SimEnd,
 }
 
 impl Msg {
