@@ -72,7 +72,7 @@ fn sim_election(
                 // Wait for election results.
                 let msg = sim_r.recv()?;
 
-                if let SimMsg::ElecionResult { id } = msg {
+                if let SimMsg::ElectionResult { id } = msg {
                     coord_id = id;
                 }
             }
@@ -107,78 +107,108 @@ impl RingMember {
         loop {
             let msg = self.r.recv()?;
             println!("{}: received {:?}", self.id, msg);
+            let res = self.handle_msg(msg)?;
 
-            match msg {
-                Msg::End => {
-                    self.s.send(msg)?;
-                    println!("{}: will now stop", self.id);
-                    println!("{}: sent stop signal forward", self.id);
-                    break;
-                }
-                Msg::Toggle { id } => {
-                    if id != self.id {
-                        self.s.send(msg)?;
-                        println!("{}: sent toggle forward", self.id);
-                        continue;
-                    }
-
-                    self.active ^= true;
-
-                    self.sim_s.send(SimMsg::ConfirmToggle {
-                        id: self.id,
-                        active: self.active
-                    })?;
-
-                    println!("{}: active = {}", self.id, self.active);
-                    println!("{}: sent toggle to sim", self.id);
-                }
-                Msg::MemberElected { id } => {
-                    if self.coord_id == id {
-                        self.sim_s.send(SimMsg::ElecionResult { id })?;
-                        println!("{}: sent result to sim", self.id);
-                        continue;
-                    }
-
-                    self.s.send(msg)?;
-                    self.coord_id = id;
-
-                    println!(
-                        "{}: {} won the election", self.id, self.coord_id
-                    );
-
-                    println!("{}: sent result forward", self.id);
-                }
-                Msg::Election { mut body } => {
-                    if !self.active {
-                        self.s.send(msg)?;
-                        println!("{}: sent election forward", self.id);
-                        continue;
-                    }
-
-                    if !body[self.id] {
-                        body[self.id] = true;
-                        let msg = Msg::Election { body };
-                        self.s.send(msg)?;
-                        println!("{}: joined election", self.id);
-                        println!("{}: sent election forward", self.id);
-                        continue;
-                    }
-
-                    let winner_id = body.iter()
-                        .enumerate()
-                        .filter(|(_, b)| **b)
-                        .map(|(i, _)| i)
-                        .min()
-                        .unwrap();
-
-                    self.s.send(Msg::MemberElected { id: winner_id })?;
-                    println!("{}: election ended", self.id);
-                    println!("{}: sent result forward", self.id);
-                }
+            if !res {
+                break;
             }
         }
 
         println!("{}: done", self.id);
+        Ok(())
+    }
+
+    fn handle_msg(&mut self, msg: Msg) -> Result<bool> {
+        match msg {
+            Msg::Election { body } => {
+                self.vote(body)?;
+                Ok(true)
+			}
+            Msg::ElectionResult { id } => {
+                self.update_coord(id)?;
+                Ok(true)
+			}
+            Msg::Toggle { id } => {
+                self.toggle(id)?;
+                Ok(true)
+			}
+            Msg::End => {
+                self.s.send(msg)?;
+                println!("{}: will now stop", self.id);
+                println!("{}: sent stop signal forward", self.id);
+                Ok(false)
+			}
+        }
+    }
+
+    /// Vote for the next coordinator or end the election if that has
+    /// already been done.
+    fn vote(&mut self, mut body: [bool; RING_SIZE]) -> Result<()> {
+        if !self.active {
+            self.s.send(Msg::Election { body })?;
+            println!("{}: sent election forward", self.id);
+            return Ok(());
+        }
+
+        if !body[self.id] {
+            body[self.id] = true;
+            let msg = Msg::Election { body };
+            self.s.send(msg)?;
+            println!("{}: joined election", self.id);
+            println!("{}: sent election forward", self.id);
+            return Ok(());
+        }
+
+        // Elect the ring member with the lowest id who voted.
+        let winner_id = body.iter()
+            .enumerate()
+            .filter(|(_, b)| **b)
+            .map(|(i, _)| i)
+            .min()
+            .unwrap();
+
+        self.s.send(Msg::ElectionResult { id: winner_id })?;
+        println!("{}: election ended", self.id);
+        println!("{}: sent result forward", self.id);
+        Ok(())
+    }
+
+    /// Update the coordinator id based on the election results.
+    fn update_coord(&mut self, id: usize) -> Result<()> {
+        if self.coord_id == id {
+            self.sim_s.send(SimMsg::ElectionResult { id })?;
+            println!("{}: sent result to sim", self.id);
+            return Ok(());
+        }
+
+        self.s.send(Msg::ElectionResult { id })?;
+        self.coord_id = id;
+
+        println!(
+            "{}: {} won the election", self.id, self.coord_id
+        );
+
+        println!("{}: sent result forward", self.id);
+        Ok(())
+    }
+
+    /// Toggle active/inactive if target is self, else send message forward.
+    fn toggle(&mut self, id: usize) -> Result<()> {
+        if id != self.id {
+            self.s.send(Msg::Toggle { id })?;
+            println!("{}: sent toggle forward", self.id);
+            return Ok(());
+        }
+
+        self.active ^= true;
+
+        self.sim_s.send(SimMsg::ConfirmToggle {
+            id: self.id,
+            active: self.active
+        })?;
+
+        println!("{}: active = {}", self.id, self.active);
+        println!("{}: sent toggle to sim", self.id);
         Ok(())
     }
 }
@@ -186,7 +216,7 @@ impl RingMember {
 #[derive(Debug)]
 enum Msg {
     Election { body: [bool; RING_SIZE] },
-    MemberElected { id: usize },
+    ElectionResult { id: usize },
     Toggle { id: usize },
     End,
 }
@@ -200,7 +230,7 @@ impl Msg {
 #[derive(Debug)]
 enum SimMsg {
     ConfirmToggle { id: usize, active: bool },
-    ElecionResult { id: usize },
+    ElectionResult { id: usize },
 }
 
 /// The `SimSeq` type, which specifies a sequence of alternating waits and
