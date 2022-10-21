@@ -64,7 +64,7 @@ fn sim_election(
         .iter()
         // Append a 0 second wait to the wait sequence
         // to get all the ids in the zip.
-        .zip(seq.waits.iter().chain(std::iter::repeat(&0)))
+        .zip(seq.waits.iter())
     {
         println!("sim: waiting for {:?}s", *secs);
         std::thread::sleep(std::time::Duration::new(*secs, 0));
@@ -253,14 +253,14 @@ impl Default for SimSeq {
             toggles.push(i + 1);
         }
 
-        SimSeq::new(toggles, [1; NUM_TOGGLES - 1].to_vec()).unwrap()
+        SimSeq::new(toggles, [1; NUM_TOGGLES].to_vec()).unwrap()
     }
 }
 
 impl SimSeq {
     fn new(toggles: Vec<usize>, waits: Vec<u64>) -> Result<Self> {
-        if toggles.len() != waits.len() + 1 {
-            bail!("Number of toggles must be equal to the number of waits + 1");
+        if toggles.len() != waits.len() {
+            bail!("Number of toggles must be equal to the number of waits");
         }
 
         Ok(Self { toggles, waits })
