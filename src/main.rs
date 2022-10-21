@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
+use std::env;
 use std::fs;
 use std::path::Path;
 
@@ -16,9 +17,13 @@ fn main() {
 
     // Create a channel for the simulator.
     let (sim_s, sim_r) = bounded(1);
-    // TODO: Read the simulation sequence from a file.
-    let path = Path::new("insert path here");
-    let sim_seq = SimSeq::from_file(path);
+    // Try to read the file from command line arguments
+    let args: Vec<String> = env::args().collect();
+
+    let sim_seq = match args.len() {
+        2 => SimSeq::from_file(Path::new(&args[1])),
+        _ => Ok(SimSeq::default()),
+    };
 
     // Spawn a thread for each ring member and one for the controller.
     // Each ring member receives on its channel and sends on the next's.
@@ -264,24 +269,33 @@ impl SimSeq {
     /// Read the simulation sequence from a file
     /// Waits on odd lines, and toggles on evens.
     fn from_file(path: &std::path::Path) -> Result<Self> {
-        let contents = fs::read_to_string(path).expect("Should have been able to read the file");
-
+        let contents;
         let mut toggles = Vec::new();
         let mut waits = Vec::new();
 
+        match fs::read_to_string(path) {
+            Ok(c) => contents = c,
+            Err(e) => panic!("Error reading file: {}", e),
+        }
+
         for (i, char) in contents.chars().enumerate() {
             // Skip newlines or whitespaces
-            if char == ' '  || char == '\n'{
+            if char == ' ' || char == '\n' {
                 continue;
-            }  // spaces increase i value, so toggles are in indexes divisible by 4
+            }
+            // spaces increase i value, so waits are in indexes divisible by 4
+            // which are represented as odd lines
             else if char.is_numeric() && i % 4 == 0 {
                 waits.push(char.to_digit(10).unwrap() as u64);
-            } // waits are in indexes divisible by 2 and not 4
+            }
+            // toggles are in indexes divisible by 2 and not 4
+            // which are represented as even lines
             else if char.is_numeric() && i % 2 == 0 {
                 toggles.push(char.to_digit(10).unwrap() as usize);
             }
         }
 
+        
         Ok(SimSeq::new(toggles, waits).unwrap())
     }
 }
