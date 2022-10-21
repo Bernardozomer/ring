@@ -34,7 +34,9 @@ fn main() {
     thread::scope(|scope| {
         for i in 0..RING_SIZE {
             let ss: HashMap<usize, Sender<Msg>> = (0..RING_SIZE)
-                .map(|j| (j.clone(), chans[j].0.clone()))
+                .map(|j| {
+                    (j.clone(), chans[j].0.clone())
+                })
                 .filter(|(j, _)| *j != i)
                 .collect::<HashMap<_, _>>();
 
@@ -42,7 +44,9 @@ fn main() {
             let r = chans[i].1.clone();
             let next_id = if i == RING_SIZE - 1 { 0 } else { i + 1 };
 
-            scope.spawn(move |_| RingMember::new(i, ss, sim_s, r, next_id, 0).run());
+            scope.spawn(
+                move |_| RingMember::new(i, ss, sim_s, r, next_id, 0).run()
+            );
         }
 
         println!("main: election ring created");
@@ -109,22 +113,10 @@ struct RingMember {
 
 impl RingMember {
     fn new(
-        id: usize,
-        ss: HashMap<usize, Sender<Msg>>,
-        sim_s: Sender<SimMsg>,
-        r: Receiver<Msg>,
-        next_id: usize,
-        coord_id: usize,
+        id: usize, ss: HashMap<usize, Sender<Msg>>, sim_s: Sender<SimMsg>,
+        r: Receiver<Msg>, next_id: usize, coord_id: usize
     ) -> Self {
-        Self {
-            id,
-            sim_active: true,
-            ss,
-            sim_s,
-            r,
-            next_id,
-            coord_id,
-        }
+        Self { id, sim_active: true, ss, sim_s, r, next_id, coord_id }
     }
 
     fn run(&mut self) -> Result<()> {
@@ -148,8 +140,7 @@ impl RingMember {
                 if !self.sim_active {
                     Ok(true)
                 } else {
-                    self.ss
-                        .get(&s_id)
+                    self.ss.get(&s_id)
                         .ok_or(Error::msg("Unknown sender"))?
                         .send(Msg::Pong)?;
 
@@ -161,25 +152,24 @@ impl RingMember {
             Msg::Election { body } => {
                 self.vote(body)?;
                 Ok(true)
-            }
+			}
             Msg::ElectionResult { id } => {
                 self.update_coord(id)?;
                 Ok(true)
-            }
+			}
             Msg::SimToggle { id } => {
                 self.toggle(id)?;
                 Ok(true)
-            }
+			}
             Msg::SimEnd => {
-                self.ss
-                    .get(&self.next_id)
+                self.ss.get(&self.next_id)
                     .ok_or(Error::msg("Invalid next member id"))?
                     .send(msg)?;
 
                 println!("{}: will now stop", self.id);
                 println!("{}: sent stop signal forward", self.id);
                 Ok(false)
-            }
+			}
         }
     }
 
@@ -189,7 +179,9 @@ impl RingMember {
         if !self.sim_active && body == [false; RING_SIZE] {
             self.send(Msg::Election { body })?;
 
-            println!("{}: received election from sim, but am inactive!", self.id);
+            println!(
+                "{}: received election from sim, but am inactive!", self.id
+            );
 
             println!("{}: forwarding election", self.id);
             return Ok(());
@@ -209,8 +201,7 @@ impl RingMember {
         }
 
         // Elect the ring member with the lowest id who voted.
-        let winner_id = body
-            .iter()
+        let winner_id = body.iter()
             .enumerate()
             .filter(|(_, b)| **b)
             .map(|(i, _)| i)
@@ -235,7 +226,9 @@ impl RingMember {
         self.sim_force_send(Msg::ElectionResult { id })?;
         self.coord_id = id;
 
-        println!("{}: {} won the election", self.id, self.coord_id);
+        println!(
+            "{}: {} won the election", self.id, self.coord_id
+        );
 
         println!("{}: sent result forward", self.id);
         Ok(())
@@ -253,7 +246,7 @@ impl RingMember {
 
         self.sim_s.send(SimMsg::ConfirmToggle {
             id: self.id,
-            active: self.sim_active,
+            active: self.sim_active
         })?;
 
         println!("{}: active = {}", self.id, self.sim_active);
@@ -263,12 +256,13 @@ impl RingMember {
 
     /// Send a message to the first active member ringwise.
     fn send(&mut self, msg: Msg) -> Result<()> {
-        let range = (0..RING_SIZE).skip(self.id + 1).chain(0..self.id);
+        let range = (0..RING_SIZE)
+            .skip(self.id + 1)
+            .chain(0..self.id);
 
         for i in range {
             // Ping the next member.
-            self.ss
-                .get(&i)
+            self.ss.get(&i)
                 .ok_or(Error::msg("Missing sender"))?
                 .send(Msg::Ping { s_id: self.id })?;
 
@@ -300,8 +294,7 @@ impl RingMember {
     /// Send a message ringwise, starting from the next member,
     /// Regardless of whether they are simulating inactivity or not.
     fn sim_force_send(&self, msg: Msg) -> Result<()> {
-        self.ss
-            .get(&self.next_id)
+        self.ss.get(&self.next_id)
             .ok_or(Error::msg("Invalid next member id"))?
             .send(msg)?;
 
