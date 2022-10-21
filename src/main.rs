@@ -1,26 +1,33 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{Result, bail, Error};
+use anyhow::{bail, Error, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
+
+use std::env;
+use std::fs;
+use std::path::Path;
 
 const RING_SIZE: usize = 3;
 
 fn main() {
     // Create a channel for each ring member.
     let chans: [(Sender<Msg>, Receiver<Msg>); RING_SIZE] = (0..RING_SIZE)
-        .map(|_| {
-            bounded(1)
-        })
+        .map(|_| bounded(1))
         .collect::<Vec<_>>()
         .try_into()
         .unwrap();
 
     // Create a channel for the simulator.
     let (sim_s, sim_r) = bounded(1);
-    // TODO: Read the simulation sequence from a file.
-    let sim_seq = SimSeq::default();
+    // Try to read the file from command line arguments
+    let args: Vec<String> = env::args().collect();
+
+    let sim_seq = match args.len() {
+        2 => SimSeq::from_file(Path::new(&args[1])),
+        _ => Ok(SimSeq::default()),
+    };
 
     // Spawn a thread for each ring member and one for the controller.
     // Each ring member receives on its channel and sends on the next's.
@@ -44,23 +51,27 @@ fn main() {
 
         println!("main: election ring created");
         let (first_s, sim_r) = (chans[0].0.clone(), sim_r.clone());
-        scope.spawn(move |_| sim_election(sim_seq, first_s, sim_r, 0));
-    }).unwrap();
+        scope.spawn(move |_| sim_election(sim_seq.unwrap(), first_s, sim_r, 0));
+    })
+    .unwrap();
 
     println!("main: done");
 }
 
 fn sim_election(
-    seq: SimSeq, first_s: Sender<Msg>, sim_r: Receiver<SimMsg>,
-    coord_id: usize
+    seq: SimSeq,
+    first_s: Sender<Msg>,
+    sim_r: Receiver<SimMsg>,
+    coord_id: usize,
 ) -> Result<()> {
     let mut coord_id = coord_id;
 
-    for (id, secs) in seq.toggles
+    for (id, secs) in seq
+        .toggles
         .iter()
         // Append a 0 second wait to the wait sequence
         // to get all the ids in the zip.
-        .zip(seq.waits.iter().chain(std::iter::repeat(&0)))
+        .zip(seq.waits.iter())
     {
         println!("sim: waiting for {:?}s", *secs);
         std::thread::sleep(std::time::Duration::new(*secs, 0));
@@ -303,7 +314,9 @@ enum Msg {
 
 impl Msg {
     fn election() -> Self {
-        Self::Election { body: [false; RING_SIZE] }
+        Self::Election {
+            body: [false; RING_SIZE],
+        }
     }
 }
 
@@ -320,7 +333,7 @@ enum SimMsg {
 /// process toggles[i] active/inactive, in this order, for i = 0 to i = n,
 /// such that n is the amount of toggles to be performed.
 ///
-/// Note that the number of toggles must be equal to the number of waits + 1.
+/// Note that the number of toggles must be equal to the number of waits.
 #[derive(Debug)]
 struct SimSeq {
     /// Ring member ids to be toggles active/inactive.
@@ -353,26 +366,48 @@ impl Default for SimSeq {
             toggles.push(i + 1);
         }
 
-        SimSeq::new(toggles, [1; NUM_TOGGLES - 1].to_vec()).unwrap()
+        SimSeq::new(toggles, [1; NUM_TOGGLES].to_vec()).unwrap()
     }
 }
 
 impl SimSeq {
-    fn new(
-        toggles: Vec<usize>, waits: Vec<u64>
-    ) -> Result<Self> {
-        if toggles.len() != waits.len() + 1 {
-            bail!(
-                "Number of toggles must be equal to the number of waits + 1"
-            );
+    fn new(toggles: Vec<usize>, waits: Vec<u64>) -> Result<Self> {
+        if toggles.len() != waits.len(){
+            bail!("Number of toggles must be equal to the number of waits");
         }
 
         Ok(Self { toggles, waits })
     }
 
-    /// Read the simulation sequence from a file.
+    /// Read the simulation sequence from a file
     /// Waits on odd lines, and toggles on evens.
     fn from_file(path: &std::path::Path) -> Result<Self> {
-        unimplemented!()
+        let contents;
+        let mut toggles = Vec::new();
+        let mut waits = Vec::new();
+
+        match fs::read_to_string(path) {
+            Ok(c) => contents = c,
+            Err(e) => panic!("Error reading file: {}", e),
+        }
+
+        for (i, char) in contents.chars().enumerate() {
+            // Skip newlines or whitespaces
+            if char == ' ' || char == '\n' {
+                continue;
+            }
+            // spaces increase i value, so waits are in indexes divisible by 4
+            // which are represented as odd lines
+            else if char.is_numeric() && i % 4 == 0 {
+                waits.push(char.to_digit(10).unwrap() as u64);
+            }
+            // toggles are in indexes divisible by 2 and not 4
+            // which are represented as even lines
+            else if char.is_numeric() && i % 2 == 0 {
+                toggles.push(char.to_digit(10).unwrap() as usize);
+            }
+        }
+
+        Ok(SimSeq::new(toggles, waits).unwrap())
     }
 }
