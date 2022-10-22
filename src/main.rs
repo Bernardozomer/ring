@@ -27,7 +27,7 @@ fn main() {
     let sim_seq = match args.len() {
         2 => SimSeq::from_file(Path::new(&args[1])),
         _ => Ok(SimSeq::default()),
-    };
+    }.unwrap();
 
     // Spawn a thread for each ring member and one for the controller.
     // Each ring member receives on its channel and sends on the next's.
@@ -51,7 +51,7 @@ fn main() {
 
         println!("main: election ring created");
         let (first_s, sim_r) = (chans[0].0.clone(), sim_r.clone());
-        scope.spawn(move |_| sim_election(sim_seq.unwrap(), first_s, sim_r, 0));
+        scope.spawn(move |_| sim_election(sim_seq, first_s, sim_r, 0));
     })
     .unwrap();
 
@@ -388,7 +388,7 @@ impl SimSeq {
 
         match fs::read_to_string(path) {
             Ok(c) => contents = c,
-            Err(e) => panic!("Error reading file: {}", e),
+            Err(e) => bail!("Error reading file: {}", e),
         }
 
         for (i, char) in contents.chars().enumerate() {
