@@ -4,14 +4,66 @@ use std::time::Duration;
 use anyhow::{bail, Error, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::thread;
+use gag::Redirect;
 
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::Path;
 
 const RING_SIZE: usize = 3;
 
 fn main() {
+    // Accept cli arguments.
+    // Usage: BIN [INPUTFILE] -o [OUTPUTFILE]
+    let args: Vec<String> = env::args().collect::<Vec<_>>();
+
+    let in_ = match args.get(1) {
+        Some(arg1) => {
+            match arg1 == "-o" {
+                true => None,
+                false => Some(Path::new(arg1))
+            }
+        }
+        None => None,
+    };
+
+    let out = match args.rsplit(|a| a == "-o").next() {
+        Some(argout) => {
+            if argout.is_empty() {
+                None
+            } else {
+                let bin_name = &args[0];
+
+                if &argout[0] == bin_name {
+                    None
+                } else {
+                    Some(Path::new(&argout[0]))
+                }
+            }
+        },
+        None => None,
+    };
+
+    run(in_, out);
+}
+
+fn run(in_: Option<&Path>, out: Option<&Path>) {
+    // If an output file path was specified, redirect stdout to that.
+    let redirect = match out {
+        Some(out_path) => {
+            let log = OpenOptions::new()
+                .truncate(true)
+                .read(true)
+                .create(true)
+                .write(true)
+                .open(out_path)
+                .unwrap();
+
+            Some(Redirect::stdout(log).unwrap())
+        }
+        None => None,
+    };
+
     // Create a channel for each ring member.
     let chans: [(Sender<Msg>, Receiver<Msg>); RING_SIZE] = (0..RING_SIZE)
         .map(|_| bounded(1))
@@ -21,12 +73,10 @@ fn main() {
 
     // Create a channel for the simulator.
     let (sim_s, sim_r) = bounded(1);
-    // Try to read the file from command line arguments
-    let args: Vec<String> = env::args().collect();
 
-    let sim_seq = match args.len() {
-        2 => SimSeq::from_file(Path::new(&args[1])),
-        _ => Ok(SimSeq::default()),
+    let sim_seq = match in_ {
+        Some(path) => SimSeq::from_file(path),
+        None => Ok(SimSeq::default()),
     }.unwrap();
 
     // Spawn a thread for each ring member and one for the controller.
@@ -56,6 +106,13 @@ fn main() {
     .unwrap();
 
     println!("main: done");
+
+    match redirect {
+        Some(redirect_) => {
+            redirect_.into_inner();
+        }
+        None => (),
+    }
 }
 
 fn sim_election(
