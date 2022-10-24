@@ -12,6 +12,7 @@ use std::path::Path;
 
 const RING_SIZE: usize = 3;
 
+
 fn main() {
     // Accept cli arguments.
     // Usage: BIN [INPUTFILE] -o [OUTPUTFILE]
